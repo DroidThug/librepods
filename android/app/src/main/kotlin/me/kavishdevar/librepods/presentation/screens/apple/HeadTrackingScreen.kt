@@ -18,7 +18,12 @@
 
 package me.kavishdevar.librepods.presentation.screens.apple
 
+import android.content.Context
+import android.content.pm.PackageManager
 import android.graphics.Paint
+import android.os.Handler
+import android.os.Looper
+import android.widget.Toast
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -58,6 +63,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -65,17 +71,20 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.kyant.backdrop.backdrops.layerBackdrop
+import androidx.core.content.edit
 import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
 import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.core.data.apple.BuddyState
+import me.kavishdevar.librepods.core.privileged.ShizukuHeadTracker
 import me.kavishdevar.librepods.core.utils.HeadTracking
 import me.kavishdevar.librepods.data.app.DesignSystem
 import me.kavishdevar.librepods.presentation.components.primitives.MaterialButtonStyle
@@ -89,6 +98,8 @@ import me.kavishdevar.librepods.presentation.icons.LocalIcons
 import me.kavishdevar.librepods.presentation.icons.MaterialIcons
 import me.kavishdevar.librepods.presentation.utils.LocalDebugMode
 import me.kavishdevar.librepods.presentation.viewmodel.AppleViewModel
+import me.kavishdevar.librepods.services.SpatialHeadTrackingController
+import rikka.shizuku.Shizuku
 import kotlin.math.abs
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
@@ -97,7 +108,8 @@ import kotlin.time.Duration.Companion.seconds
 fun HeadTrackingScreen(
     viewModel: AppleViewModel,
     navigateBack: (() -> Unit)?,
-    navigateToPurchase: () -> Unit
+    navigateToPurchase: () -> Unit,
+    navigateToDiagnostics: () -> Unit
 ) {
     val design = LocalDesign.current
 
@@ -122,6 +134,14 @@ fun HeadTrackingScreen(
 
     val scrollState = rememberScrollState()
 
+    val context = LocalContext.current
+    var spatialEnabled by remember { mutableStateOf(SpatialHeadTrackingController.isEnabled(context)) }
+    val setSpatialEnabled: (Boolean) -> Unit = { value ->
+        context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+            .edit { putBoolean(SpatialHeadTrackingController.PREF_KEY, value) }
+        spatialEnabled = value
+    }
+
     StyledScaffold(
         title = stringResource(R.string.head_gestures),
         navigateBack = navigateBack,
@@ -135,7 +155,7 @@ fun HeadTrackingScreen(
                             .minimumInteractiveComponentSize()
                             .size(IconButtonDefaults.mediumContainerSize(IconButtonDefaults.IconButtonWidthOption.Uniform)),
                         shape = IconButtonDefaults.mediumRoundShape,
-                        enabled = state.headTrackingState != BuddyState.WAITING
+                        enabled = state.headTrackingState != BuddyState.WAITING && !spatialEnabled
                     ) {
                         Icon(
                             imageVector = if (state.headTrackingState == BuddyState.ACTIVE) MaterialIcons.Pause else Icons.Default.PlayArrow,
@@ -147,7 +167,7 @@ fun HeadTrackingScreen(
                     StyledIconButton(
                         onClick = if (state.headTrackingState != BuddyState.ACTIVE) viewModel::startHeadTracking else viewModel::stopHeadTracking,
                         hazeInput = hazeInput,
-                        enabled = state.headTrackingState != BuddyState.WAITING
+                        enabled = state.headTrackingState != BuddyState.WAITING && !spatialEnabled
                     ) {
                         Icon(
                             imageVector = if (state.headTrackingState == BuddyState.ACTIVE) LocalIcons.current.Pause else LocalIcons.current.Play,
@@ -201,6 +221,31 @@ fun HeadTrackingScreen(
                     description = stringResource(R.string.head_gestures_details),
                     header = true
                 )
+
+                SpatialHeadTrackingToggle(spatialEnabled, setSpatialEnabled)
+
+                if (spatialEnabled) {
+                    Text(
+                        stringResource(R.string.spatial_head_tracking_controls_stream),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onBackground,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                    )
+                }
+
+                StyledButton(
+                    onClick = navigateToDiagnostics,
+                    backdrop = backdrop,
+                    modifier = Modifier.fillMaxWidth(),
+                    maxScale = 0.05f,
+                    materialButtonStyle = MaterialButtonStyle.Outlined
+                ) {
+                    Text(
+                        stringResource(R.string.head_tracking_diagnostics),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
 
                 Spacer(modifier = Modifier.height(16.dp))
                 Text(
@@ -304,6 +349,48 @@ fun HeadTrackingScreen(
             Spacer(modifier = Modifier.height(bottomPadding))
         }
     }
+}
+
+private const val SHIZUKU_PERMISSION_REQUEST = 5001
+
+@Composable
+private fun SpatialHeadTrackingToggle(enabled: Boolean, setEnabled: (Boolean) -> Unit) {
+    val context = LocalContext.current
+    val currentSetEnabled by rememberUpdatedState(setEnabled)
+
+    val shizukuNotRunning = stringResource(R.string.shizuku_not_running)
+    val permissionDenied = stringResource(R.string.shizuku_permission_denied)
+
+    DisposableEffect(Unit) {
+        val listener = Shizuku.OnRequestPermissionResultListener { requestCode, grantResult ->
+            if (requestCode != SHIZUKU_PERMISSION_REQUEST) return@OnRequestPermissionResultListener
+            if (grantResult == PackageManager.PERMISSION_GRANTED) {
+                currentSetEnabled(true)
+            } else {
+                Toast.makeText(context, permissionDenied, Toast.LENGTH_LONG).show()
+            }
+        }
+        Shizuku.addRequestPermissionResultListener(listener, Handler(Looper.getMainLooper()))
+        onDispose {
+            Shizuku.removeRequestPermissionResultListener(listener)
+        }
+    }
+
+    StyledToggle(
+        label = stringResource(R.string.spatial_head_tracking),
+        description = stringResource(R.string.spatial_head_tracking_description),
+        checked = enabled,
+        onCheckedChange = { on ->
+            when {
+                !on -> setEnabled(false)
+                !ShizukuHeadTracker.isShizukuAvailable() ->
+                    Toast.makeText(context, shizukuNotRunning, Toast.LENGTH_LONG).show()
+                !ShizukuHeadTracker.hasPermission() ->
+                    ShizukuHeadTracker.requestPermission(SHIZUKU_PERMISSION_REQUEST)
+                else -> setEnabled(true)
+            }
+        }
+    )
 }
 
 @Composable

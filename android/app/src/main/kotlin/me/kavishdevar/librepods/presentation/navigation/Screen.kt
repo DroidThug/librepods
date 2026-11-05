@@ -36,6 +36,11 @@ sealed interface Screen: NavKey {
     ): DeviceScreen
 
     @Serializable
+    data class HeadTrackingDiagnostics(
+        override val macAddress: MacAddress
+    ): DeviceScreen
+
+    @Serializable
     data class Accessibility(
         override val macAddress: MacAddress
     ): DeviceScreen

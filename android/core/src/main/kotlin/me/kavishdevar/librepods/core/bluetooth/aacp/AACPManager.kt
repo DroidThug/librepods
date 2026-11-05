@@ -59,6 +59,9 @@ import me.kavishdevar.librepods.core.devices.AppleDevice
 import me.kavishdevar.librepods.core.devices.BatterySource
 import me.kavishdevar.librepods.core.devices.BatteryStatus
 import me.kavishdevar.librepods.core.devices.DeviceComponent
+import me.kavishdevar.librepods.core.privileged.HeadPoseSample
+import me.kavishdevar.librepods.core.privileged.HeadPoseTelemetry
+import me.kavishdevar.librepods.core.privileged.ShizukuHeadTracker
 import me.kavishdevar.librepods.core.utils.HeadTracking
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -1147,6 +1150,45 @@ class AACPManager(private val device: AppleDevice) {
         return capabilities
     }
 
+    private var poseRef: FloatArray? = null
+    private var poseBasis: Array<FloatArray>? = null
+    private val poseCal = ArrayList<FloatArray>()
+    private val poseCalAccel = FloatArray(3)
+    private var poseCalRetries = 0
+    private var poseUp: FloatArray? = null
+
+    private companion object PoseAxes {
+        const val POSE_CAL_FRAMES = 12
+        const val POSE_CAL_MAX_RETRIES = 5
+        const val POSE_CAL_STILL_RAD = 0.105f
+        private fun norm(v: FloatArray): FloatArray {
+            val n = kotlin.math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2])
+            return floatArrayOf(v[0] / n, v[1] / n, v[2] / n)
+        }
+        val YAW_AXIS: FloatArray = norm(floatArrayOf(-0.726f, 0.680f, 0.106f))
+        val PITCH_AXIS: FloatArray = run {
+            val p = floatArrayOf(-0.091f, -0.172f, 0.981f)
+            val d = p[0] * YAW_AXIS[0] + p[1] * YAW_AXIS[1] + p[2] * YAW_AXIS[2]
+            norm(floatArrayOf(p[0] - d * YAW_AXIS[0], p[1] - d * YAW_AXIS[1], p[2] - d * YAW_AXIS[2]))
+        }
+        // head x = -PITCH, head z = -YAW, head y = z cross x = YAW cross PITCH
+        val ROLL_AXIS: FloatArray = floatArrayOf(
+            YAW_AXIS[1] * PITCH_AXIS[2] - YAW_AXIS[2] * PITCH_AXIS[1],
+            YAW_AXIS[2] * PITCH_AXIS[0] - YAW_AXIS[0] * PITCH_AXIS[2],
+            YAW_AXIS[0] * PITCH_AXIS[1] - YAW_AXIS[1] * PITCH_AXIS[0]
+        )
+    }
+    private var poseLogCount = 0
+
+    fun recenterPose() {
+        poseRef = null
+        poseBasis = null
+        poseUp = null
+        poseCal.clear()
+        poseCalAccel.fill(0f)
+        poseCalRetries = 0
+    }
+
     private fun handleSensorData(data: SensorDataWX) {
         if (data.hasCommand()) {
             when (data.command.service) {
@@ -1178,7 +1220,123 @@ class AACPManager(private val device: AppleDevice) {
                         }
                     }
 
-                    HeadTracking.addAccel(i16(device.settings.value.headGesturesVerticalOffset).toFloat(), i16(device.settings.value.headGesturesHorizontalOffset).toFloat())
+                    val vertical = i16(device.settings.value.headGesturesVerticalOffset)
+                    val horizontal = i16(device.settings.value.headGesturesHorizontalOffset)
+
+                    HeadTracking.addAccel(vertical.toFloat(), horizontal.toFloat())
+
+                    // EXPERIMENTAL: spatial-audio head tracking via a Shizuku-privileged
+                    // virtual uhid head tracker. See HEADTRACKING_FORK_NOTES.md.
+                    val telemetryActive = HeadPoseTelemetry.active
+                    if (ShizukuHeadTracker.enabled || telemetryActive) {
+                        // Payload carries a unit quaternion: x@20 y@22 z@24 (int16 LE /32768),
+                        // w implied >= 0. Send rotation relative to the first frame as a
+                        // rotation vector (rad) in the Android head frame (x right, y forward,
+                        // z up), scaled so 32768 == pi, per the HID head tracker spec.
+                        val qx0 = i16(20) / 32768f
+                        val qy0 = i16(22) / 32768f
+                        val qz0 = i16(24) / 32768f
+                        val vn = qx0 * qx0 + qy0 * qy0 + qz0 * qz0
+                        if (vn < 0.01f || vn > 1.01f) return
+                        val qw0 = kotlin.math.sqrt(maxOf(0f, 1f - vn))
+                        val qn = kotlin.math.sqrt(qw0 * qw0 + vn)
+                        val qw = qw0 / qn; val qx = qx0 / qn; val qy = qy0 / qn; val qz = qz0 / qn
+                        val cur = floatArrayOf(qw, qx, qy, qz)
+                        // Neutral pose = hemisphere-aligned mean of POSE_CAL_FRAMES still frames;
+                        // restart the window if the head moves, up to POSE_CAL_MAX_RETRIES times.
+                        val ref = poseRef ?: run {
+                            val first = poseCal.firstOrNull()
+                            if (first != null) {
+                                val d = kotlin.math.abs(
+                                    first[0] * qw + first[1] * qx + first[2] * qy + first[3] * qz
+                                ).coerceIn(0f, 1f)
+                                if (2f * kotlin.math.acos(d) > POSE_CAL_STILL_RAD &&
+                                    poseCalRetries < POSE_CAL_MAX_RETRIES
+                                ) {
+                                    poseCal.clear()
+                                    poseCalAccel.fill(0f)
+                                    poseCalRetries++
+                                }
+                            }
+                            poseCal.add(cur)
+                            poseCalAccel[0] += i16(44); poseCalAccel[1] += i16(46); poseCalAccel[2] += i16(48)
+                            if (poseCal.size < POSE_CAL_FRAMES) return
+                            val f0 = poseCal[0]
+                            val acc = FloatArray(4)
+                            for (q in poseCal) {
+                                val sg = if (f0[0] * q[0] + f0[1] * q[1] + f0[2] * q[2] + f0[3] * q[3] < 0f) -1f else 1f
+                                for (i in 0..3) acc[i] += sg * q[i]
+                            }
+                            val an = kotlin.math.sqrt(acc[0] * acc[0] + acc[1] * acc[1] + acc[2] * acc[2] + acc[3] * acc[3])
+                            val avg = floatArrayOf(acc[0] / an, acc[1] / an, acc[2] / an, acc[3] / an)
+                            val n = poseCal.size.toFloat()
+                            poseUp = floatArrayOf(poseCalAccel[0] / n, poseCalAccel[1] / n, poseCalAccel[2] / n)
+                            poseCal.clear()
+                            poseCalAccel.fill(0f)
+                            poseCalRetries = 0
+                            poseRef = avg
+                            avg
+                        }
+                        // rel = conj(ref) * q
+                        val rw = ref[0] * qw + ref[1] * qx + ref[2] * qy + ref[3] * qz
+                        var rx = ref[0] * qx - ref[1] * qw - ref[2] * qz + ref[3] * qy
+                        var ry = ref[0] * qy + ref[1] * qz - ref[2] * qw - ref[3] * qx
+                        var rz = ref[0] * qz - ref[1] * qy + ref[2] * qx - ref[3] * qw
+                        var w = rw
+                        if (w < 0f) { w = -w; rx = -rx; ry = -ry; rz = -rz }
+                        val s = kotlin.math.sqrt(rx * rx + ry * ry + rz * rz)
+                        val angle = 2f * kotlin.math.atan2(s, w)
+                        val k = if (s > 1e-6f) angle / s else 0f
+                        val scale = 32768f / Math.PI.toFloat()
+                        val vx = rx * k; val vy = ry * k; val vz = rz * k
+                        // Axes measured on-device: turning left reads negative along YAW_AXIS,
+                        // nodding down reads positive along PITCH_AXIS (sensor frame).
+                        val basis = poseBasis ?: run {
+                            // Head frame in sensor coords: x = ear axis (fixed), z = gravity-up from
+                            // the accelerometer at the reference pose, y = z cross x.
+                            val upAcc = poseUp ?: floatArrayOf(i16(44).toFloat(), i16(46).toFloat(), i16(48).toFloat())
+                            val ax = upAcc[0]; val ay = upAcc[1]; val az = upAcc[2]
+                            val an = kotlin.math.sqrt(ax * ax + ay * ay + az * az)
+                            val up = if (an > 300f) floatArrayOf(ax / an, ay / an, az / an) else YAW_AXIS
+                            val xh = floatArrayOf(-PITCH_AXIS[0], -PITCH_AXIS[1], -PITCH_AXIS[2])
+                            val d = up[0] * xh[0] + up[1] * xh[1] + up[2] * xh[2]
+                            val zs = norm(floatArrayOf(up[0] - d * xh[0], up[1] - d * xh[1], up[2] - d * xh[2]))
+                            val zh = floatArrayOf(-zs[0], -zs[1], -zs[2])
+                            val yh = floatArrayOf(
+                                zh[1] * xh[2] - zh[2] * xh[1],
+                                zh[2] * xh[0] - zh[0] * xh[2],
+                                zh[0] * xh[1] - zh[1] * xh[0]
+                            )
+                            arrayOf(xh, yh, zh).also { poseBasis = it }
+                        }
+                        val hx = vx * basis[0][0] + vy * basis[0][1] + vz * basis[0][2]
+                        val hy = vx * basis[1][0] + vy * basis[1][1] + vz * basis[1][2]
+                        val hz = vx * basis[2][0] + vy * basis[2][1] + vz * basis[2][2]
+                        fun raw(v: Float) = (v * scale).toInt().coerceIn(-32767, 32767)
+                        if (++poseLogCount % 25 == 1) {
+                            Log.i(TAG, "pose head(rad) x=$hx y=$hy z=$hz")
+                        }
+                        val sx = raw(hx); val sy = raw(hy); val sz = raw(hz)
+                        // Gyro at payload [26:32] is in the same sensor frame as the quaternion
+                        // (fit R^2 0.999 on a 65 s capture). ~1/512 rad/s per LSB; the HID field is
+                        // 1/1024 rad/s per LSB, so raw = 2 * LSB, rotated into the head frame.
+                        val gx = i16(26).toFloat(); val gy = i16(28).toFloat(); val gz = i16(30).toFloat()
+                        fun vel(b: FloatArray) = ((gx * b[0] + gy * b[1] + gz * b[2]) * 2f).toInt().coerceIn(-32767, 32767)
+                        ShizukuHeadTracker.sendPose(sx, sy, sz, vel(basis[0]), vel(basis[1]), vel(basis[2]))
+                        if (telemetryActive) {
+                            HeadPoseTelemetry.publish(
+                                HeadPoseSample(
+                                    seq = HeadPoseTelemetry.nextSeq(),
+                                    elapsedNanos = android.os.SystemClock.elapsedRealtimeNanos(),
+                                    qw = qw, qx = qx, qy = qy, qz = qz,
+                                    ax = i16(44), ay = i16(46), az = i16(48),
+                                    headX = hx, headY = hy, headZ = hz,
+                                    sentRx = sx, sentRy = sy, sentRz = sz
+                                ),
+                                payload
+                            )
+                        }
+                    }
                 }
 
                 SensorServiceType.HEARTRATE,

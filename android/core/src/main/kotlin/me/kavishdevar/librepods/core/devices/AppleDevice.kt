@@ -351,10 +351,10 @@ class AppleDevice(
     }
 
     fun setHeadTrackingInterval(interval: Duration) {
-        startHeadTracking()
         _settings.update {
             it.copy(headTrackingInterval = interval)
         }
+        startHeadTracking()
     }
 
     fun setCustomEqEnabled(enabled: Boolean) {

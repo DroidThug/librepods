@@ -24,6 +24,7 @@ import me.kavishdevar.librepods.presentation.screens.apple.AppleSettingsRoute
 import me.kavishdevar.librepods.presentation.screens.apple.CallControlScreen
 import me.kavishdevar.librepods.presentation.screens.apple.DebugRoute
 import me.kavishdevar.librepods.presentation.screens.apple.EqualizerRoute
+import me.kavishdevar.librepods.presentation.screens.apple.HeadTrackingDiagnosticsScreen
 import me.kavishdevar.librepods.presentation.screens.apple.HeadTrackingScreen
 import me.kavishdevar.librepods.presentation.screens.apple.HearingAidAdjustmentsScreen
 import me.kavishdevar.librepods.presentation.screens.apple.HearingAidScreen
@@ -206,7 +207,21 @@ fun RenderScreenContent(
             HeadTrackingScreen(
                 viewModel = appleViewModel,
                 navigateBack = navigateBack,
-                navigateToPurchase = ::navigateToPurchase
+                navigateToPurchase = ::navigateToPurchase,
+                navigateToDiagnostics = { navigate(Screen.HeadTrackingDiagnostics(screen.macAddress)) }
+            )
+        }
+
+        is Screen.HeadTrackingDiagnostics -> {
+            val device = devices[screen.macAddress] as? AppleDevice ?: return
+            val factory = createAppleViewModelFactory(device, appDataRepository, recordingRepository, heartRateRepository)
+            val appleViewModel: AppleViewModel = viewModel(
+                key = "${screen.macAddress.value}:${device.connectionNumber}",
+                factory = factory
+            )
+            HeadTrackingDiagnosticsScreen(
+                viewModel = appleViewModel,
+                navigateBack = navigateBack
             )
         }
 

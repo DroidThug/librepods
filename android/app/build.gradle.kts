@@ -195,6 +195,7 @@ dependencies {
     ksp(libs.androidx.room3.compiler)
     implementation(libs.kotlinx.serialization.cbor)
     implementation(libs.protobuf.kotlin)
+    implementation(libs.shizuku.api)
 //    compileOnly(files("../../../framework-classes.jar"))
     implementation(libs.androidx.healthconnect.client)
     implementation(libs.materialKolor.material3)

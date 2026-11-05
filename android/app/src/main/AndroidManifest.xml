@@ -121,6 +121,14 @@
             android:name=".presentation.activities.NoiseControlWidgetConfigurationActivity"
             android:exported="false" />
 
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:multiprocess="false"
+            android:enabled="true"
+            android:exported="true"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+
         <service
             android:name=".services.LibrePodsService"
             android:enabled="true"
@@ -192,5 +200,6 @@
     </application>
     <queries>
         <package android:name="com.google.android.apps.healthdata" />
+        <package android:name="moe.shizuku.privileged.api" />
     </queries>
 </manifest>
