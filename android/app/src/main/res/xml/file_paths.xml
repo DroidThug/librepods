@@ -2,4 +2,5 @@
 <paths>
     <files-path name="logs" path="logs/"/>
     <external-files-path name="recordings" path="Recordings/"/>
+    <external-files-path name="headtracking_logs" path="headtracking_logs/"/>
 </paths>

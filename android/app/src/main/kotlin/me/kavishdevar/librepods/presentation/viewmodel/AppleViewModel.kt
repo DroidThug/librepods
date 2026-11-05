@@ -180,6 +180,7 @@ class AppleViewModel(
 
     fun startHeadTracking() = device.startHeadTracking()
     fun stopHeadTracking() = device.stopHeadTracking()
+    fun recenterHeadPose() = device.aacp.recenterPose()
 
     fun setHeadGesturesEnabled(enabled: Boolean) = device.setHeadGesturesEnabled(enabled)
 

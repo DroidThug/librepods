@@ -170,8 +170,13 @@ class LibrePodsService: Service() {
 
     private var isCallRinging = false
 
+    private val spatialHeadTracking by lazy {
+        SpatialHeadTrackingController(this, serviceCoroutineScope, devices)
+    }
+
     private val telephonyCallback = object: TelephonyCallback(), TelephonyCallback.CallStateListener {
         override fun onCallStateChanged(state: Int) {
+            spatialHeadTracking.setInCall(state != TelephonyManager.CALL_STATE_IDLE)
             if (state == TelephonyManager.CALL_STATE_RINGING) {
                 isCallRinging = true
                 attemptConnect("phone")
@@ -272,6 +277,8 @@ class LibrePodsService: Service() {
 
         loadDevices()
 
+        spatialHeadTracking.start()
+
         bleManager.start()
 
         MediaController.initialize(
@@ -340,6 +347,7 @@ class LibrePodsService: Service() {
     }
 
     override fun onDestroy() {
+        spatialHeadTracking.stop()
         unregisterBluetoothReceivers()
         bleManager.stop()
         serviceCoroutineScope.cancel("Service stopped")

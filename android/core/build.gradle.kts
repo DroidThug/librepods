@@ -47,6 +47,9 @@ android {
             res.directories += "src/main/res-apple"
         }
     }
+    buildFeatures {
+        aidl = true
+    }
 
     lint {
         checkDependencies = false
@@ -58,4 +61,6 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.kotlinx.serialization.cbor)
     implementation(libs.protobuf.kotlin)
+    implementation(libs.shizuku.api)
+    implementation(libs.shizuku.provider)
 }
