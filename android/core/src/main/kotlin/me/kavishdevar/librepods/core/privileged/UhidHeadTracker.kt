@@ -214,9 +214,9 @@ class UhidHeadTracker {
      *   byte0    = Report ID (0x01)
      *   byte1-6  = 3 x int16 LE (rx, ry, rz)
      *   byte7-12 = 3 x int16 LE angular velocity, 32767 == 32 rad/s
-     *   byte13   = valid flag (0x01)
+     *   byte13   = discontinuity counter (uint8; was a constant 0x01)
      */
-    fun sendPose(rx: Int, ry: Int, rz: Int, vx: Int, vy: Int, vz: Int): Boolean {
+    fun sendPose(rx: Int, ry: Int, rz: Int, vx: Int, vy: Int, vz: Int, discontinuity: Int = 1): Boolean {
         val f = raf ?: return false
         // This ROM's HAL never sends SET_REPORT when enabling the sensor, so
         // gating on it would block all output; send unconditionally like the reference.
@@ -230,7 +230,7 @@ class UhidHeadTracker {
             report.putShort(vx.toShort())
             report.putShort(vy.toShort())
             report.putShort(vz.toShort())
-            report.put(0x01)
+            report.put(discontinuity.toByte())
 
             val buf = ByteBuffer.allocate(EVENT_SIZE).order(ByteOrder.LITTLE_ENDIAN)
             buf.putInt(UHID_INPUT2)

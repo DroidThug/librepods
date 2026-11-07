@@ -47,6 +47,30 @@ object ShizukuHeadTracker {
     @Volatile
     var enabled: Boolean = false
 
+    /**
+     * Optional Apple-style bleed-to-zero recentering of the pose (see TempestRecenter). Set by the
+     * app's head tracking controller from the `spatial_head_tracking_apple_recenter` preference.
+     */
+    @Volatile
+    var appleRecenter: Boolean = false
+
+    /**
+     * Use the old sensor-frame head basis instead of the gravity-aligned HeadFrame (A/B switch).
+     * Set by the app's head tracking controller from `spatial_head_tracking_legacy_frame`.
+     */
+    @Volatile
+    var legacyFrame: Boolean = HeadFrame.LEGACY_FRAME_DEFAULT
+
+    /**
+     * Mirror the fixed ear axis (flips pitch and roll) when the left / right bud is primary. Set by
+     * the app's head tracking controller from `spatial_head_tracking_mirror_ear_left` / `_right`.
+     */
+    @Volatile
+    var mirrorEarLeft: Boolean = false
+
+    @Volatile
+    var mirrorEarRight: Boolean = false
+
     @Volatile
     private var service: IHeadTrackerService? = null
 
@@ -115,11 +139,14 @@ object ShizukuHeadTracker {
         return _connected.value
     }
 
-    /** Feeds one orientation sample. rx/ry/rz are signed int16-range values. */
-    fun sendPose(rx: Int, ry: Int, rz: Int, vx: Int = 0, vy: Int = 0, vz: Int = 0) {
+    /**
+     * Feeds one orientation sample. rx/ry/rz are signed int16-range values; [discontinuity] is the
+     * HID discontinuity counter (uint8), changed whenever the pose jumps (recenter).
+     */
+    fun sendPose(rx: Int, ry: Int, rz: Int, vx: Int = 0, vy: Int = 0, vz: Int = 0, discontinuity: Int = 1) {
         if (!enabled) return
         try {
-            service?.sendPose(rx, ry, rz, vx, vy, vz)
+            service?.sendPose(rx, ry, rz, vx, vy, vz, discontinuity)
         } catch (t: Throwable) {
             val now = SystemClock.elapsedRealtime()
             if (now - lastSendFailureLog >= 1000) {

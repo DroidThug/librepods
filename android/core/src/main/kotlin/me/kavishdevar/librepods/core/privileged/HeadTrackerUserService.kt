@@ -65,8 +65,8 @@ class HeadTrackerUserService : IHeadTrackerService.Stub() {
         return ok
     }
 
-    override fun sendPose(rx: Int, ry: Int, rz: Int, vx: Int, vy: Int, vz: Int) {
-        tracker.sendPose(rx, ry, rz, vx, vy, vz)
+    override fun sendPose(rx: Int, ry: Int, rz: Int, vx: Int, vy: Int, vz: Int, discontinuity: Int) {
+        tracker.sendPose(rx, ry, rz, vx, vy, vz, discontinuity)
     }
 
     override fun stop() {
