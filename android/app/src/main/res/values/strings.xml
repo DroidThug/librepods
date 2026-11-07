@@ -463,6 +463,14 @@
     <string name="show_close_button">Show close button</string>
     <string name="spatial_head_tracking">Spatial audio head tracking (experimental, needs Shizuku)</string>
     <string name="spatial_head_tracking_description">Feeds AirPods head movement to Android\'s spatial audio so the sound stays anchored as you turn your head. Runs while AirPods are connected.</string>
+    <string name="spatial_head_tracking_apple_recenter">Recenter when still (experimental)</string>
+    <string name="spatial_head_tracking_apple_recenter_description">After about 5 seconds without head movement, slowly moves the front of the sound field to where you are facing.</string>
+    <string name="spatial_head_tracking_mirror_ear">Flip pitch/roll (if nodding looks inverted)</string>
+    <string name="spatial_head_tracking_mirror_ear_description">Saved for the %1$s AirPod, which is currently the primary one. Turning stays the same.</string>
+    <string name="spatial_head_tracking_bud_left">left</string>
+    <string name="spatial_head_tracking_bud_right">right</string>
+    <string name="spatial_head_tracking_legacy_frame">Legacy head frame (for comparison)</string>
+    <string name="spatial_head_tracking_legacy_frame_description">Uses the older head orientation math, which leaks some head tilt into turns. Off by default.</string>
     <string name="spatial_head_tracking_controls_stream">Pause is controlled by Spatial audio head tracking.</string>
     <string name="shizuku_not_running">Shizuku is not running. Start Shizuku and try again.</string>
     <string name="shizuku_permission_denied">Shizuku permission was denied.</string>

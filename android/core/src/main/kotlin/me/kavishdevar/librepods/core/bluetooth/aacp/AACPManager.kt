@@ -59,9 +59,12 @@ import me.kavishdevar.librepods.core.devices.AppleDevice
 import me.kavishdevar.librepods.core.devices.BatterySource
 import me.kavishdevar.librepods.core.devices.BatteryStatus
 import me.kavishdevar.librepods.core.devices.DeviceComponent
+import me.kavishdevar.librepods.core.privileged.HeadFrame
 import me.kavishdevar.librepods.core.privileged.HeadPoseSample
 import me.kavishdevar.librepods.core.privileged.HeadPoseTelemetry
 import me.kavishdevar.librepods.core.privileged.ShizukuHeadTracker
+import me.kavishdevar.librepods.core.privileged.TempestConstants
+import me.kavishdevar.librepods.core.privileged.TempestRecenter
 import me.kavishdevar.librepods.core.utils.HeadTracking
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -1150,12 +1153,23 @@ class AACPManager(private val device: AppleDevice) {
         return capabilities
     }
 
+    /**
+     * Whether the fixed ear axis is mirrored for the bud that is primary now (per-bud preference,
+     * see ShizukuHeadTracker.mirrorEarLeft/Right). Read every frame, so a primary swap applies at once.
+     */
+    private fun poseMirrorEar(): Boolean = when (device.state.value.primaryComponent) {
+        DeviceComponent.LEFT -> ShizukuHeadTracker.mirrorEarLeft
+        DeviceComponent.RIGHT -> ShizukuHeadTracker.mirrorEarRight
+        else -> false
+    }
+
     private var poseRef: FloatArray? = null
     private var poseBasis: Array<FloatArray>? = null
     private val poseCal = ArrayList<FloatArray>()
     private val poseCalAccel = FloatArray(3)
     private var poseCalRetries = 0
     private var poseUp: FloatArray? = null
+    private var poseBasisMirror = false
 
     private companion object PoseAxes {
         const val POSE_CAL_FRAMES = 12
@@ -1177,10 +1191,19 @@ class AACPManager(private val device: AppleDevice) {
             YAW_AXIS[2] * PITCH_AXIS[0] - YAW_AXIS[0] * PITCH_AXIS[2],
             YAW_AXIS[0] * PITCH_AXIS[1] - YAW_AXIS[1] * PITCH_AXIS[0]
         )
+        // Head +x (right ear) in sensor coords; the gravity-aligned frame only uses its horizontal part.
+        val EAR_AXIS: FloatArray = floatArrayOf(-PITCH_AXIS[0], -PITCH_AXIS[1], -PITCH_AXIS[2])
+        val EAR_AXIS_MIRRORED: FloatArray = HeadFrame.mirrored(EAR_AXIS)
     }
     private var poseLogCount = 0
+    // HID discontinuity counter (uint8); 1 until the first recenter, as before.
+    private var poseDiscontinuity = 1
+    private val poseTempest = TempestRecenter()
 
     fun recenterPose() {
+        // Output jumps back to ~zero after recalibration: tell the consumer (HID spec).
+        if (poseRef != null) poseDiscontinuity = TempestRecenter.nextDiscontinuity(poseDiscontinuity)
+        poseTempest.reset()
         poseRef = null
         poseBasis = null
         poseUp = null
@@ -1244,7 +1267,7 @@ class AACPManager(private val device: AppleDevice) {
                         val cur = floatArrayOf(qw, qx, qy, qz)
                         // Neutral pose = hemisphere-aligned mean of POSE_CAL_FRAMES still frames;
                         // restart the window if the head moves, up to POSE_CAL_MAX_RETRIES times.
-                        val ref = poseRef ?: run {
+                        var ref = poseRef ?: run {
                             val first = poseCal.firstOrNull()
                             if (first != null) {
                                 val d = kotlin.math.abs(
@@ -1277,6 +1300,21 @@ class AACPManager(private val device: AppleDevice) {
                             poseRef = avg
                             avg
                         }
+                        // Optional (off by default): Apple-style bleed-to-zero, see TempestRecenter.
+                        if (ShizukuHeadTracker.appleRecenter) {
+                            ref = poseTempest.update(
+                                android.os.SystemClock.elapsedRealtimeNanos(),
+                                TempestRecenter.gyroRateRadS(i16(26), i16(28), i16(30)),
+                                cur, ref
+                            )
+                            poseRef = ref
+                            if (poseTempest.rezeroStarted) {
+                                Log.i(TAG, "pose re-zero after quiescence (#${poseTempest.rezeroCount})")
+                                if (TempestConstants.BUMP_DISCONTINUITY_ON_REZERO) {
+                                    poseDiscontinuity = TempestRecenter.nextDiscontinuity(poseDiscontinuity)
+                                }
+                            }
+                        }
                         // rel = conj(ref) * q
                         val rw = ref[0] * qw + ref[1] * qx + ref[2] * qy + ref[3] * qz
                         var rx = ref[0] * qx - ref[1] * qw - ref[2] * qz + ref[3] * qy
@@ -1291,6 +1329,9 @@ class AACPManager(private val device: AppleDevice) {
                         val vx = rx * k; val vy = ry * k; val vz = rz * k
                         // Axes measured on-device: turning left reads negative along YAW_AXIS,
                         // nodding down reads positive along PITCH_AXIS (sensor frame).
+                        // Mirrored sensors (other bud): flip the ear axis, which inverts pitch and roll only.
+                        val mirror = poseMirrorEar()
+                        if (mirror != poseBasisMirror) { poseBasis = null; poseBasisMirror = mirror }
                         val basis = poseBasis ?: run {
                             // Head frame in sensor coords: x = ear axis (fixed), z = gravity-up from
                             // the accelerometer at the reference pose, y = z cross x.
@@ -1298,7 +1339,7 @@ class AACPManager(private val device: AppleDevice) {
                             val ax = upAcc[0]; val ay = upAcc[1]; val az = upAcc[2]
                             val an = kotlin.math.sqrt(ax * ax + ay * ay + az * az)
                             val up = if (an > 300f) floatArrayOf(ax / an, ay / an, az / an) else YAW_AXIS
-                            val xh = floatArrayOf(-PITCH_AXIS[0], -PITCH_AXIS[1], -PITCH_AXIS[2])
+                            val xh = if (mirror) PITCH_AXIS.copyOf() else floatArrayOf(-PITCH_AXIS[0], -PITCH_AXIS[1], -PITCH_AXIS[2])
                             val d = up[0] * xh[0] + up[1] * xh[1] + up[2] * xh[2]
                             val zs = norm(floatArrayOf(up[0] - d * xh[0], up[1] - d * xh[1], up[2] - d * xh[2]))
                             val zh = floatArrayOf(-zs[0], -zs[1], -zs[2])
@@ -1309,9 +1350,15 @@ class AACPManager(private val device: AppleDevice) {
                             )
                             arrayOf(xh, yh, zh).also { poseBasis = it }
                         }
-                        val hx = vx * basis[0][0] + vy * basis[0][1] + vz * basis[0][2]
-                        val hy = vx * basis[1][0] + vy * basis[1][1] + vz * basis[1][2]
-                        val hz = vx * basis[2][0] + vy * basis[2][1] + vz * basis[2][2]
+                        // Default: relative rotation in the quaternion's gravity-aligned world frame,
+                        // projected on z = up, x = horizontal ear axis (HeadFrame). The legacy sensor-frame
+                        // basis above stays for A/B (spatial_head_tracking_legacy_frame) and as the fallback
+                        // when the ear axis is near vertical.
+                        val worldBasis = if (ShizukuHeadTracker.legacyFrame) null else HeadFrame.basis(ref, if (mirror) EAR_AXIS_MIRRORED else EAR_AXIS)
+                        val head = worldBasis?.let { HeadFrame.project(HeadFrame.relRotVecWorld(ref, cur), it) }
+                        val hx = if (head != null) head[0] else vx * basis[0][0] + vy * basis[0][1] + vz * basis[0][2]
+                        val hy = if (head != null) head[1] else vx * basis[1][0] + vy * basis[1][1] + vz * basis[1][2]
+                        val hz = if (head != null) head[2] else vx * basis[2][0] + vy * basis[2][1] + vz * basis[2][2]
                         fun raw(v: Float) = (v * scale).toInt().coerceIn(-32767, 32767)
                         if (++poseLogCount % 25 == 1) {
                             Log.i(TAG, "pose head(rad) x=$hx y=$hy z=$hz")
@@ -1322,7 +1369,11 @@ class AACPManager(private val device: AppleDevice) {
                         // 1/1024 rad/s per LSB, so raw = 2 * LSB, rotated into the head frame.
                         val gx = i16(26).toFloat(); val gy = i16(28).toFloat(); val gz = i16(30).toFloat()
                         fun vel(b: FloatArray) = ((gx * b[0] + gy * b[1] + gz * b[2]) * 2f).toInt().coerceIn(-32767, 32767)
-                        ShizukuHeadTracker.sendPose(sx, sy, sz, vel(basis[0]), vel(basis[1]), vel(basis[2]))
+                        // New frame: sensor -> world with the current attitude, then onto the neutral head axes.
+                        val headRate = worldBasis?.let { HeadFrame.headRate(cur, floatArrayOf(gx, gy, gz), it) }
+                        fun velOut(i: Int) =
+                            if (headRate != null) (headRate[i] * 2f).toInt().coerceIn(-32767, 32767) else vel(basis[i])
+                        ShizukuHeadTracker.sendPose(sx, sy, sz, velOut(0), velOut(1), velOut(2), poseDiscontinuity)
                         if (telemetryActive) {
                             HeadPoseTelemetry.publish(
                                 HeadPoseSample(

@@ -36,6 +36,7 @@ import me.kavishdevar.librepods.core.data.apple.BuddyState
 import me.kavishdevar.librepods.core.devices.AppleDevice
 import me.kavishdevar.librepods.core.devices.ConnectionState
 import me.kavishdevar.librepods.core.devices.Device
+import me.kavishdevar.librepods.core.privileged.HeadFrame
 import me.kavishdevar.librepods.core.privileged.ShizukuHeadTracker
 import rikka.shizuku.Shizuku
 import kotlin.time.Duration
@@ -68,6 +69,10 @@ class SpatialHeadTrackingController(
 
     private val prefListener = SharedPreferences.OnSharedPreferenceChangeListener { p, key ->
         if (key == PREF_KEY) toggle.value = p.getBoolean(PREF_KEY, false)
+        if (key == APPLE_RECENTER_PREF_KEY) ShizukuHeadTracker.appleRecenter = p.getBoolean(APPLE_RECENTER_PREF_KEY, false)
+        if (key == MIRROR_EAR_LEFT_PREF_KEY) ShizukuHeadTracker.mirrorEarLeft = p.getBoolean(MIRROR_EAR_LEFT_PREF_KEY, false)
+        if (key == MIRROR_EAR_RIGHT_PREF_KEY) ShizukuHeadTracker.mirrorEarRight = p.getBoolean(MIRROR_EAR_RIGHT_PREF_KEY, false)
+        if (key == LEGACY_FRAME_PREF_KEY) ShizukuHeadTracker.legacyFrame = p.getBoolean(LEGACY_FRAME_PREF_KEY, HeadFrame.LEGACY_FRAME_DEFAULT)
     }
     private val binderReceived = Shizuku.OnBinderReceivedListener { shizukuReady.value = true }
     private val binderDead = Shizuku.OnBinderDeadListener { shizukuReady.value = false }
@@ -78,6 +83,10 @@ class SpatialHeadTrackingController(
 
     fun start() {
         prefs.registerOnSharedPreferenceChangeListener(prefListener)
+        ShizukuHeadTracker.appleRecenter = prefs.getBoolean(APPLE_RECENTER_PREF_KEY, false)
+        ShizukuHeadTracker.legacyFrame = prefs.getBoolean(LEGACY_FRAME_PREF_KEY, HeadFrame.LEGACY_FRAME_DEFAULT)
+        ShizukuHeadTracker.mirrorEarLeft = prefs.getBoolean(MIRROR_EAR_LEFT_PREF_KEY, false)
+        ShizukuHeadTracker.mirrorEarRight = prefs.getBoolean(MIRROR_EAR_RIGHT_PREF_KEY, false)
         Shizuku.addBinderReceivedListenerSticky(binderReceived)
         Shizuku.addBinderDeadListener(binderDead)
 
@@ -184,6 +193,13 @@ class SpatialHeadTrackingController(
     companion object {
         private const val TAG = "SpatialHeadTracking"
         const val PREF_KEY = "spatial_head_tracking_enabled"
+        /** Optional Apple-style bleed-to-zero recentering of the pose; default off. */
+        const val APPLE_RECENTER_PREF_KEY = "spatial_head_tracking_apple_recenter"
+        /** A/B switch: true = old sensor-frame head basis, false (default) = gravity-aligned HeadFrame. */
+        const val LEGACY_FRAME_PREF_KEY = "spatial_head_tracking_legacy_frame"
+        /** Per-bud ear-axis mirror (flips pitch/roll), applied for whichever bud is primary. */
+        const val MIRROR_EAR_LEFT_PREF_KEY = "spatial_head_tracking_mirror_ear_left"
+        const val MIRROR_EAR_RIGHT_PREF_KEY = "spatial_head_tracking_mirror_ear_right"
         private const val MAX_ATTEMPTS = 10
         private val BASE_BACKOFF = 5.seconds
         private val MAX_BACKOFF = 60.seconds

@@ -99,6 +99,8 @@ import me.kavishdevar.librepods.presentation.icons.MaterialIcons
 import me.kavishdevar.librepods.presentation.utils.LocalDebugMode
 import me.kavishdevar.librepods.presentation.viewmodel.AppleViewModel
 import me.kavishdevar.librepods.services.SpatialHeadTrackingController
+import me.kavishdevar.librepods.core.privileged.HeadFrame
+import me.kavishdevar.librepods.core.devices.DeviceComponent
 import rikka.shizuku.Shizuku
 import kotlin.math.abs
 import kotlin.time.Duration.Companion.milliseconds
@@ -140,6 +142,28 @@ fun HeadTrackingScreen(
         context.getSharedPreferences("settings", Context.MODE_PRIVATE)
             .edit { putBoolean(SpatialHeadTrackingController.PREF_KEY, value) }
         spatialEnabled = value
+    }
+    var appleRecenter by remember {
+        mutableStateOf(
+            context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+                .getBoolean(SpatialHeadTrackingController.APPLE_RECENTER_PREF_KEY, false)
+        )
+    }
+    val setAppleRecenter: (Boolean) -> Unit = { value ->
+        context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+            .edit { putBoolean(SpatialHeadTrackingController.APPLE_RECENTER_PREF_KEY, value) }
+        appleRecenter = value
+    }
+    var legacyFrame by remember {
+        mutableStateOf(
+            context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+                .getBoolean(SpatialHeadTrackingController.LEGACY_FRAME_PREF_KEY, HeadFrame.LEGACY_FRAME_DEFAULT)
+        )
+    }
+    val setLegacyFrame: (Boolean) -> Unit = { value ->
+        context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+            .edit { putBoolean(SpatialHeadTrackingController.LEGACY_FRAME_PREF_KEY, value) }
+        legacyFrame = value
     }
 
     StyledScaffold(
@@ -230,6 +254,40 @@ fun HeadTrackingScreen(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onBackground,
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                    )
+                    StyledToggle(
+                        label = stringResource(R.string.spatial_head_tracking_apple_recenter),
+                        description = stringResource(R.string.spatial_head_tracking_apple_recenter_description),
+                        checked = appleRecenter,
+                        onCheckedChange = setAppleRecenter
+                    )
+                    // Mirror setting is stored per bud and applies to the bud that is primary now.
+                    val primaryRight = state.primaryComponent == DeviceComponent.RIGHT
+                    val mirrorKey = if (primaryRight) SpatialHeadTrackingController.MIRROR_EAR_RIGHT_PREF_KEY
+                        else SpatialHeadTrackingController.MIRROR_EAR_LEFT_PREF_KEY
+                    var mirrorEar by remember(mirrorKey) {
+                        mutableStateOf(
+                            context.getSharedPreferences("settings", Context.MODE_PRIVATE).getBoolean(mirrorKey, false)
+                        )
+                    }
+                    StyledToggle(
+                        label = stringResource(R.string.spatial_head_tracking_mirror_ear),
+                        description = stringResource(
+                            R.string.spatial_head_tracking_mirror_ear_description,
+                            stringResource(if (primaryRight) R.string.spatial_head_tracking_bud_right else R.string.spatial_head_tracking_bud_left)
+                        ),
+                        checked = mirrorEar,
+                        onCheckedChange = { value ->
+                            context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+                                .edit { putBoolean(mirrorKey, value) }
+                            mirrorEar = value
+                        }
+                    )
+                    StyledToggle(
+                        label = stringResource(R.string.spatial_head_tracking_legacy_frame),
+                        description = stringResource(R.string.spatial_head_tracking_legacy_frame_description),
+                        checked = legacyFrame,
+                        onCheckedChange = setLegacyFrame
                     )
                 }
 

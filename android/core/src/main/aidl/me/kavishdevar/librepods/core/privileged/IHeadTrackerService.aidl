@@ -18,9 +18,10 @@ interface IHeadTrackerService {
 
     /**
      * Feeds one orientation sample. rx/ry/rz are signed int16-range values.
+     * discontinuity is the HID discontinuity counter (uint8); it changes when the pose jumps.
      * oneway: called per frame from the AACP reader thread, which must not block.
      */
-    oneway void sendPose(int rx, int ry, int rz, int vx, int vy, int vz);
+    oneway void sendPose(int rx, int ry, int rz, int vx, int vy, int vz, int discontinuity);
 
     /** Destroys the uhid device and releases /dev/uhid. */
     void stop();
