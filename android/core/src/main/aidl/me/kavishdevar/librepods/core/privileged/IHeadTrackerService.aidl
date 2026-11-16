@@ -28,4 +28,19 @@ interface IHeadTrackerService {
 
     /** Lets the app ask the privileged process to exit entirely. */
     void destroy();
+
+    // Appended methods only (transaction codes of the ones above must not move). A UserService
+    // left over from an older install lacks these; callers catch the failure. Restart the
+    // helper (toggle off/on) after a reinstall.
+
+    /** Starts writing 0 to the cgroup freeze files of these uids every 300 ms. */
+    void startKeepAlive(in int[] uids);
+
+    void stopKeepAlive();
+
+    /** First keep-alive failure not yet reported (one per uid), or null. */
+    String takeKeepAliveFailure();
+
+    /** Runs `cmd deviceidle whitelist +pkg` as shell; returns its output or the error. */
+    String whitelistPackage(String pkg);
 }

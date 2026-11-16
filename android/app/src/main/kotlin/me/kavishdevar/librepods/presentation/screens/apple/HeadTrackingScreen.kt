@@ -19,6 +19,11 @@
 package me.kavishdevar.librepods.presentation.screens.apple
 
 import android.content.Context
+import android.annotation.SuppressLint
+import android.content.Intent
+import android.net.Uri
+import android.os.PowerManager
+import android.provider.Settings
 import android.content.pm.PackageManager
 import android.graphics.Paint
 import android.os.Handler
@@ -294,7 +299,7 @@ fun HeadTrackingScreen(
                         else SpatialHeadTrackingController.MIRROR_EAR_LEFT_PREF_KEY
                     var mirrorEar by remember(mirrorKey) {
                         mutableStateOf(
-                            context.getSharedPreferences("settings", Context.MODE_PRIVATE).getBoolean(mirrorKey, false)
+                            context.getSharedPreferences("settings", Context.MODE_PRIVATE).getBoolean(mirrorKey, HeadFrame.MIRROR_EAR_DEFAULT)
                         )
                     }
                     StyledToggle(
@@ -310,6 +315,7 @@ fun HeadTrackingScreen(
                             mirrorEar = value
                         }
                     )
+                    BatteryOptimizationRow()
                     StyledToggle(
                         label = stringResource(R.string.spatial_head_tracking_legacy_frame),
                         description = stringResource(R.string.spatial_head_tracking_legacy_frame_description),
@@ -457,6 +463,44 @@ fun HeadTrackingScreen(
 
 
 private const val SHIZUKU_PERMISSION_REQUEST = 5001
+
+/** Shows whether the app is exempt from battery optimization and offers to request it. */
+@SuppressLint("BatteryLife")
+@Composable
+private fun BatteryOptimizationRow() {
+    val context = LocalContext.current
+    val pm = remember { context.getSystemService(Context.POWER_SERVICE) as PowerManager }
+    var ignoring by remember { mutableStateOf(pm.isIgnoringBatteryOptimizations(context.packageName)) }
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val obs = androidx.lifecycle.LifecycleEventObserver { _, e ->
+            if (e == androidx.lifecycle.Lifecycle.Event.ON_RESUME) ignoring = pm.isIgnoringBatteryOptimizations(context.packageName)
+        }
+        lifecycleOwner.lifecycle.addObserver(obs)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
+    }
+    Text(
+        stringResource(if (ignoring) R.string.spatial_head_tracking_battery_unrestricted else R.string.spatial_head_tracking_battery_optimized),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onBackground,
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+    )
+    if (!ignoring) {
+        androidx.compose.material3.TextButton(
+            onClick = {
+                try {
+                    context.startActivity(
+                        Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:${context.packageName}"))
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    )
+                } catch (_: Exception) {
+                    context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                }
+            },
+            modifier = Modifier.padding(horizontal = 8.dp)
+        ) { Text(stringResource(R.string.spatial_head_tracking_battery_request)) }
+    }
+}
 
 @Composable
 private fun SpatialHeadTrackingToggle(enabled: Boolean, setEnabled: (Boolean) -> Unit) {

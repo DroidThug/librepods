@@ -63,6 +63,7 @@ import me.kavishdevar.librepods.core.privileged.HeadFrame
 import me.kavishdevar.librepods.core.privileged.HeadPoseSample
 import me.kavishdevar.librepods.core.privileged.HeadPoseTelemetry
 import me.kavishdevar.librepods.core.privileged.ShizukuHeadTracker
+import me.kavishdevar.librepods.core.posebus.PoseShare
 import me.kavishdevar.librepods.core.privileged.TempestConstants
 import me.kavishdevar.librepods.core.privileged.TempestRecenter
 import me.kavishdevar.librepods.core.utils.HeadTracking
@@ -81,12 +82,34 @@ class AACPManager(private val device: AppleDevice) {
 
     private val rtBuddyManager = RTBuddyManager(::sendPacket)
 
+    private var halfOpenRetries = 0
+    private val CONNECT_WAIT_MS = 10_000L
+    private val MAX_HALF_OPEN_RETRIES = 3
+
     private suspend fun sendDelayedInitPackets() {
         socket?.let {
+            // A half-open channel (seen after quick reinstalls) can leave connect() returning while
+            // isConnected stays false; do not wait forever, reconnect a few times instead.
+            var waitedMs = 0L
             while (!it.isConnected) {
+                if (it !== socket) return
+                if (waitedMs >= CONNECT_WAIT_MS) {
+                    if (halfOpenRetries < MAX_HALF_OPEN_RETRIES) {
+                        halfOpenRetries++
+                        Log.w(TAG, "not connected after $waitedMs ms, reconnecting ($halfOpenRetries/$MAX_HALF_OPEN_RETRIES)")
+                        try { it.close() } catch (_: Exception) { }
+                        if (socket === it) socket = null
+                        connect()
+                    } else {
+                        Log.e(TAG, "not connected after $MAX_HALF_OPEN_RETRIES reconnects, giving up until the next connect")
+                    }
+                    return
+                }
                 Log.i(TAG, "waiting for connection...")
                 delay(500.milliseconds)
+                waitedMs += 500
             }
+            halfOpenRetries = 0
             Log.i(TAG, "initializing connection")
 
             connectService4()
@@ -1219,6 +1242,9 @@ class AACPManager(private val device: AppleDevice) {
                 SensorServiceType.CMA,
                 SensorServiceType.DEVMOTION6 -> {
                     val payload = data.command.payload.toByteArray()
+                    val arrivalNanos = android.os.SystemClock.elapsedRealtimeNanos()
+                    ShizukuHeadTracker.onSensorPacket?.invoke(arrivalNanos / 1_000_000L)
+
                     if (!HeadTracking.updateFromPayload(payload)) {
                         Log.d(TAG, "Ignoring invalid motion report: ${payload.toHexString()}")
                         return
@@ -1361,6 +1387,17 @@ class AACPManager(private val device: AppleDevice) {
                         fun velOut(i: Int) =
                             if (headRate != null) (headRate[i] * 2f).toInt().coerceIn(-32767, 32767) else vel(basis[i])
                         ShizukuHeadTracker.sendPose(sx, sy, sz, velOut(0), velOut(1), velOut(2), poseDiscontinuity)
+                        // Pose bus (shared memory, see HEADTRACKING_FORK_NOTES.md): the same pose as floats, before
+                        // HID quantisation; angular velocity in rad/s (gyro LSB = 1/512 rad/s).
+                        fun velRad(i: Int): Float =
+                            if (headRate != null) headRate[i] / 512f
+                            else (gx * basis[i][0] + gy * basis[i][1] + gz * basis[i][2]) / 512f
+                        // Legacy frame or its fallback (worldBasis null): rotvec = conj(ref) * q on the sensor-fixed
+                        // basis with the body-frame gyro, i.e. a body-frame angvel -> flags bit2.
+                        PoseShare.writePose(
+                            arrivalNanos, hx, hy, hz, velRad(0), velRad(1), velRad(2), poseDiscontinuity,
+                            bodyFrame = worldBasis == null
+                        )
                         if (telemetryActive) {
                             HeadPoseTelemetry.publish(
                                 HeadPoseSample(

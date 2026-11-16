@@ -9,8 +9,11 @@
 */
 package me.kavishdevar.librepods.services
 
+import android.app.usage.UsageStatsManager
 import android.content.Context
 import android.content.SharedPreferences
+import android.os.PowerManager
+import android.os.Process
 import android.os.SystemClock
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
@@ -18,17 +21,20 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import me.kavishdevar.librepods.core.bluetooth.MacAddress
@@ -36,8 +42,10 @@ import me.kavishdevar.librepods.core.data.apple.BuddyState
 import me.kavishdevar.librepods.core.devices.AppleDevice
 import me.kavishdevar.librepods.core.devices.ConnectionState
 import me.kavishdevar.librepods.core.devices.Device
+import me.kavishdevar.librepods.core.posebus.PoseShare
 import me.kavishdevar.librepods.core.privileged.HeadFrame
 import me.kavishdevar.librepods.core.privileged.ShizukuHeadTracker
+import me.kavishdevar.librepods.core.privileged.StreamWatchdog
 import rikka.shizuku.Shizuku
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
@@ -67,11 +75,18 @@ class SpatialHeadTrackingController(
     @Volatile
     private var stopped = false
 
+    private val events = HeadTrackingEventLog(context)
+    private val watchdog = StreamWatchdog()
+    private val wakeLock: PowerManager.WakeLock =
+        (context.getSystemService(Context.POWER_SERVICE) as PowerManager)
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "librepods:headtracking")
+            .apply { setReferenceCounted(false) }
+
     private val prefListener = SharedPreferences.OnSharedPreferenceChangeListener { p, key ->
         if (key == PREF_KEY) toggle.value = p.getBoolean(PREF_KEY, false)
         if (key == APPLE_RECENTER_PREF_KEY) ShizukuHeadTracker.appleRecenter = p.getBoolean(APPLE_RECENTER_PREF_KEY, false)
-        if (key == MIRROR_EAR_LEFT_PREF_KEY) ShizukuHeadTracker.mirrorEarLeft = p.getBoolean(MIRROR_EAR_LEFT_PREF_KEY, false)
-        if (key == MIRROR_EAR_RIGHT_PREF_KEY) ShizukuHeadTracker.mirrorEarRight = p.getBoolean(MIRROR_EAR_RIGHT_PREF_KEY, false)
+        if (key == MIRROR_EAR_LEFT_PREF_KEY) ShizukuHeadTracker.mirrorEarLeft = p.getBoolean(MIRROR_EAR_LEFT_PREF_KEY, HeadFrame.MIRROR_EAR_DEFAULT)
+        if (key == MIRROR_EAR_RIGHT_PREF_KEY) ShizukuHeadTracker.mirrorEarRight = p.getBoolean(MIRROR_EAR_RIGHT_PREF_KEY, HeadFrame.MIRROR_EAR_DEFAULT)
         if (key == LEGACY_FRAME_PREF_KEY) ShizukuHeadTracker.legacyFrame = p.getBoolean(LEGACY_FRAME_PREF_KEY, HeadFrame.LEGACY_FRAME_DEFAULT)
     }
     private val binderReceived = Shizuku.OnBinderReceivedListener { shizukuReady.value = true }
@@ -85,8 +100,8 @@ class SpatialHeadTrackingController(
         prefs.registerOnSharedPreferenceChangeListener(prefListener)
         ShizukuHeadTracker.appleRecenter = prefs.getBoolean(APPLE_RECENTER_PREF_KEY, false)
         ShizukuHeadTracker.legacyFrame = prefs.getBoolean(LEGACY_FRAME_PREF_KEY, HeadFrame.LEGACY_FRAME_DEFAULT)
-        ShizukuHeadTracker.mirrorEarLeft = prefs.getBoolean(MIRROR_EAR_LEFT_PREF_KEY, false)
-        ShizukuHeadTracker.mirrorEarRight = prefs.getBoolean(MIRROR_EAR_RIGHT_PREF_KEY, false)
+        ShizukuHeadTracker.mirrorEarLeft = prefs.getBoolean(MIRROR_EAR_LEFT_PREF_KEY, HeadFrame.MIRROR_EAR_DEFAULT)
+        ShizukuHeadTracker.mirrorEarRight = prefs.getBoolean(MIRROR_EAR_RIGHT_PREF_KEY, HeadFrame.MIRROR_EAR_DEFAULT)
         Shizuku.addBinderReceivedListenerSticky(binderReceived)
         Shizuku.addBinderDeadListener(binderDead)
 
@@ -99,6 +114,16 @@ class SpatialHeadTrackingController(
                     withContext(Dispatchers.IO) { synchronized(lock) { stopBridgeLocked() } }
                     if (device != null) runBridge(device)
                 }
+        }
+        scope.launch {
+            var last: String? = null
+            connectedAppleDevice().map { it?.macAddress?.toRedactedString() }.distinctUntilChanged().collect { mac ->
+                if (toggle.value) {
+                    if (mac != null) events.log("AACP_CONNECTED", mac)
+                    else if (last != null) events.log("AACP_DISCONNECTED", last!!)
+                }
+                last = mac
+            }
         }
     }
 
@@ -135,12 +160,22 @@ class SpatialHeadTrackingController(
             val upSince = SystemClock.elapsedRealtime()
             coroutineScope {
                 val streaming = launch { keepStreaming(device) }
+                val watching = launch { watchStream(device) }
+                val primary = launch {
+                    device.state.map { it.primaryComponent }.distinctUntilChanged().drop(1).collect { c ->
+                        events.log("PRIMARY_CHANGED", c.name)
+                        recenter(device, "primary changed")
+                    }
+                }
                 ShizukuHeadTracker.connected.first { !it }
                 streaming.cancel()
+                watching.cancel()
+                primary.cancel()
             }
             val upFor = SystemClock.elapsedRealtime() - upSince
             failures = if (upFor >= MAX_BACKOFF.inWholeMilliseconds) 1 else failures + 1
             Log.w(TAG, "bridge died after $upFor ms (failure $failures)")
+            events.log("HELPER_RESTART", "up ${upFor} ms, failure $failures")
         }
         Log.w(TAG, "bridge failed $MAX_ATTEMPTS times, giving up until the next state change")
         withContext(Dispatchers.IO) { synchronized(lock) { stopBridgeLocked() } }
@@ -148,19 +183,42 @@ class SpatialHeadTrackingController(
 
     private fun startBridge(device: AppleDevice): Boolean = synchronized(lock) {
         if (stopped) return false
-        device.aacp.recenterPose()
+        recenter(device, "bridge start")
         val ok = ShizukuHeadTracker.start(context.applicationContext, device.macAddress.value)
         ShizukuHeadTracker.enabled = ok
         Log.i(TAG, "bridge start for ${device.macAddress.toRedactedString()} -> $ok")
-        if (ok) active = device
+        if (ok) {
+            active = device
+            PoseShare.setTrackingActive(true)
+            events.log("TRACKING_START", device.macAddress.toRedactedString())
+            logBatteryState()
+            wakeLock.acquire(WAKE_LOCK_TIMEOUT_MS)
+            ShizukuHeadTracker.onSensorPacket = { now ->
+                val ev = watchdog.onPacket(now)
+                if (ev is StreamWatchdog.Event.Resume) {
+                    PoseShare.setStalled(false)
+                    events.log("RESUME", "gap ${ev.gapMs} ms")
+                    recenter(device, "resume after ${ev.gapMs} ms")
+                }
+            }
+            if (!ShizukuHeadTracker.startKeepAlive(intArrayOf(Process.myUid()))) {
+                events.log("KEEPALIVE_FAIL", "helper does not support keep-alive (restart it after a reinstall)")
+            }
+            events.log("DEVICEIDLE_WHITELIST", ShizukuHeadTracker.whitelistPackage(context.packageName).replace('\n', ' '))
+        }
         ok
     }
 
     private fun stopBridgeLocked() {
         ShizukuHeadTracker.enabled = false
+        ShizukuHeadTracker.onSensorPacket = null
+        PoseShare.setTrackingActive(false)
+        ShizukuHeadTracker.stopKeepAlive()
         ShizukuHeadTracker.shutdown(context.applicationContext)
+        if (wakeLock.isHeld) wakeLock.release()
         val prev = active ?: return
         active = null
+        events.log("TRACKING_STOP", prev.macAddress.toRedactedString())
         if (prev.connectionState.value == ConnectionState.CONNECTED) prev.stopHeadTracking()
         Log.i(TAG, "bridge stopped for ${prev.macAddress.toRedactedString()}")
     }
@@ -190,8 +248,54 @@ class SpatialHeadTrackingController(
             }
     }
 
+    private fun recenter(device: AppleDevice, reason: String) {
+        device.aacp.recenterPose()
+        events.log("RECENTER", reason)
+    }
+
+    private fun logBatteryState() {
+        val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+        val bucket = try {
+            (context.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager).appStandbyBucket.toString()
+        } catch (t: Throwable) {
+            "unknown"
+        }
+        events.log("BATTERY_STATE", "ignoringOptimizations=${pm.isIgnoringBatteryOptimizations(context.packageName)} standbyBucket=$bucket")
+    }
+
+    // Stall watchdog: every 500 ms while the bridge runs. No packet for > 1.5 s re-sends the stream
+    // start (backing off 3 s to 15 s); also refreshes the wake lock and reports keep-alive failures.
+    private suspend fun watchStream(device: AppleDevice) {
+        var lastWakeRefresh = SystemClock.elapsedRealtime()
+        watchdog.check(lastWakeRefresh, false) // re-arm for this bridge run
+        while (currentCoroutineContext().isActive) {
+            val now = SystemClock.elapsedRealtime()
+            val on = device.connectionState.value == ConnectionState.CONNECTED && !inCall.value
+            for (ev in watchdog.check(now, on)) when (ev) {
+                is StreamWatchdog.Event.Stall -> {
+                    PoseShare.setStalled(true)
+                    events.log("STALL", "gap ${ev.gapMs} ms")
+                }
+                StreamWatchdog.Event.Request -> {
+                    events.log("STREAM_REQUESTED")
+                    device.startHeadTracking()
+                }
+                is StreamWatchdog.Event.Resume -> Unit
+            }
+            if (now - lastWakeRefresh > WAKE_LOCK_REFRESH_MS) {
+                wakeLock.acquire(WAKE_LOCK_TIMEOUT_MS)
+                lastWakeRefresh = now
+            }
+            withContext(Dispatchers.IO) { ShizukuHeadTracker.takeKeepAliveFailure() }?.let { events.log("KEEPALIVE_FAIL", it) }
+            delay(WATCHDOG_PERIOD_MS)
+        }
+    }
+
     companion object {
         private const val TAG = "SpatialHeadTracking"
+        private const val WATCHDOG_PERIOD_MS = 500L
+        private const val WAKE_LOCK_TIMEOUT_MS = 10 * 60 * 1000L
+        private const val WAKE_LOCK_REFRESH_MS = 60 * 1000L
         const val PREF_KEY = "spatial_head_tracking_enabled"
         /** Optional Apple-style bleed-to-zero recentering of the pose; default off. */
         const val APPLE_RECENTER_PREF_KEY = "spatial_head_tracking_apple_recenter"

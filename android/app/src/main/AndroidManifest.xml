@@ -13,6 +13,8 @@
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission
         android:name="android.permission.BLUETOOTH_PRIVILEGED"
@@ -197,9 +199,21 @@
             </intent-filter>
         </activity-alias>
 
+        <!-- Pose bus: read-only shared-memory head pose for allowlisted apps (HEADTRACKING_FORK_NOTES.md). -->
+        <service
+            android:name=".services.PoseShareService"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="me.kavishdevar.librepods.POSE_SHARE" />
+            </intent-filter>
+        </service>
+
     </application>
     <queries>
         <package android:name="com.google.android.apps.healthdata" />
+        <!-- pose bus clients (PoseShare.ALLOWED_PACKAGES), so their uids resolve to package names -->
+        <package android:name="dev.spatialrenderer.player" />
+        <package android:name="com.apple.android.music" />
         <package android:name="moe.shizuku.privileged.api" />
     </queries>
 </manifest>

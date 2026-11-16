@@ -124,7 +124,8 @@ split, so a ~12 deg error there mixes pitch and roll slightly; a per-device ear-
 The fixed ear axis was measured with one bud as primary. If the left and right sensors are mirror images, the axis points
 the wrong way when the other bud supplies the stream, which inverts pitch and roll but not yaw (z stays up, x flips, so
 y = z cross x flips too). Hypothesis only: on log 20261107_121606.csv pitch went from 0 to -19 deg while the user looked up,
-and yaw was correct (to be confirmed). Setting: `spatial_head_tracking_mirror_ear_left` / `_right` (default false), toggle
+and yaw was correct (to be confirmed). Setting: `spatial_head_tracking_mirror_ear_left` / `_right` (default **true** since the user's pair needed the flip on both
+buds, so it is probably the measured constant that was inverted rather than one bud; saved values are kept), toggle
 "Flip pitch/roll" on Head Gestures, which writes the key for the bud that is primary now (`AppleState.primaryComponent`,
 read every frame, so a primary swap applies at once). It applies to both the new and the legacy frame; with it off, output
 is unchanged. Caveat: it assumes the primary bud is the one streaming sensor data, and `primaryComponent` reads LEFT until
@@ -150,6 +151,75 @@ recenters its own head pose when the counter changes, which would combine with t
 AOSP, unverified on a phone). Apple's rule needs both its own IMU and the source device's to be quiet; we only use the
 AirPods, so holding a turned head still for 5 s also re-zeros there. With the option off the output is bit-identical to
 before (checked by `op11/ap/re/tempest/identity_check.sh`). Not tested on a phone.
+
+### Staying alive with the screen off, stalls and the event log
+
+Only while spatial head tracking is on (`SpatialHeadTrackingController`):
+
+- A `PARTIAL_WAKE_LOCK` (`librepods:headtracking`, 10 min timeout refreshed every minute) is held while the bridge runs.
+- The Shizuku helper writes `0` to `cgroup.freeze` of the app uid (and its own uid, and their `pid_*` children) every 300 ms
+  (`CgroupKeepAlive`): `/sys/fs/cgroup/apps/uid_<uid>/`, else `/sys/fs/cgroup/uid_<uid>/`. This counters ColorOS freezing
+  the app with the screen off (as O-Pose does). Paths and shell write access are assumptions, not verified on the phone.
+- Once per bridge start the helper runs `cmd deviceidle whitelist +me.kavishdevar.librepods` (result in the event log).
+  The Head Gestures screen shows whether battery optimization is off and offers the system request dialog.
+- `StreamWatchdog` (checked every 500 ms): no sensor packet for 1.5 s logs STALL and re-sends the stream start (again after
+  3 s, doubling to 15 s); the first packet after a gap over 2 s logs RESUME and recenters (stale neutral pose). The pose
+  is also recentered on every bridge start (AACP connect) and when the primary bud changes.
+- `AACPManager.sendDelayedInitPackets()` no longer waits forever for a half-open socket: after 10 s it closes and reconnects,
+  up to 3 times (this applies whether or not head tracking is on).
+- Event log: `Android/data/me.kavishdevar.librepods/files/headtracking_logs/events.log` (rotates to `events.log.1` at 1 MB):
+  `<wall clock> <elapsedRealtime ms> <EVENT> <details>` for TRACKING_START/STOP, AACP_CONNECTED/DISCONNECTED,
+  STREAM_REQUESTED, STALL, RESUME, RECENTER, PRIMARY_CHANGED, HELPER_RESTART, KEEPALIVE_FAIL (first per uid),
+  BATTERY_STATE, DEVICEIDLE_WHITELIST.
+- The AIDL gained methods at the end (`startKeepAlive`, `stopKeepAlive`, `takeKeepAliveFailure`, `whitelistPackage`). A helper
+  left over from an older install lacks them (logged as KEEPALIVE_FAIL); toggle head tracking off and on after a reinstall.
+
+### Pose bus: shared-memory pose for other apps
+
+Gives other apps (our spatial renderer player; later possibly a hooked Apple Music) the same head pose with no per-pose
+IPC. The platform head-tracker sensor is hidden from normal apps on this phone, unix sockets between these processes are
+denied by SELinux, and per-pose Binder messages add thread hops; a shared region lets a reader's native audio callback
+read the latest pose lock-free, and any number of readers can map it.
+
+- `app/.../services/PoseShareService.kt`: exported bound service, action `me.kavishdevar.librepods.POSE_SHARE`, returns
+  `core/.../posebus/IPoseShare.aidl` { `SharedMemory getPoseMemory()` (transaction 1), `int getLayoutVersion()` (2) }.
+  Every call checks `Binder.getCallingUid()` -> packages against `PoseShare.ALLOWED_PACKAGES` (single constant: `dev.spatialrenderer.player`,
+  `com.apple.android.music`) and throws `SecurityException` otherwise. The manifest `<queries>` lists them so their uids resolve.
+- `core/.../posebus/PoseShare.kt`: one 4096-byte `SharedMemory` per process, created on the first client request, mapped
+  read/write here, then `setProtect(PROT_READ)` so every client mapping is read-only. Writes are no-ops until then.
+- `core/.../posebus/PoseShareWriter.kt`: layout v1 and the seqlock writer: seq+1 (odd), `VarHandle.releaseFence()`,
+  fields, fence, seq+1 (even); calls are serialized.
+- `AACPManager.handleSensorData()` writes every pose right after `ShizukuHeadTracker.sendPose`: `hx, hy, hz` (rad, after
+  the head frame, mirror and recenter stages, i.e. the HID values before int16 quantisation), angular velocity in rad/s
+  (head-frame gyro / 512, before the x2 HID scaling), the discontinuity counter, and `elapsedRealtimeNanos()` taken at the
+  top of the DEVMOTION6 branch. Poses exist only while the pipeline runs (`ShizukuHeadTracker.enabled` or Diagnostics
+  telemetry), so the bus currently needs the Shizuku head tracking toggle on and the bridge up.
+- Flags: bit0 set on bridge start and by every pose, cleared on bridge stop (also clears bit1); bit1 set on watchdog STALL,
+  cleared on RESUME and by the next pose; bit2 set by every pose written in the legacy sensor-fixed frame (A/B switch
+  `spatial_head_tracking_legacy_frame`, or the automatic fallback when `HeadFrame.basis` returns null), cleared by every
+  pose in the default world frame. bit2 means angvel is the body-frame rate (`dR/dt = R [w]x`, predict with
+  `q (x) exp(w dt / 2)`); clear means the space-frame rate (`dR/dt = [w]x R`, `exp(w dt / 2) (x) q`). It was a reserved
+  zero bit before, so the layout version stays 1.
+
+Layout v1, little-endian. Header at 0: u32 magic `'POSE'` 0x45534F50, u32 layoutVersion 1, u32 recordSize 64, zero to 64.
+Record at 64 (offsets relative to it):
+
+| Offset | Type | Field |
+|---|---|---|
+| 0 | u32 | seq (odd while writing, even when stable) |
+| 4 | u32 | flags: bit0 tracking active, bit1 stream stalled, bit2 body-frame angvel (legacy/fallback frame); others 0 |
+| 8 | u32 | sampleCounter (+1 per pose) |
+| 12 | u32 | discontinuity (HID counter) |
+| 16 | i64 | arrivalElapsedRealtimeNanos |
+| 24 | i64 | sensorTimestampNanos (0 = unknown; always 0 for now) |
+| 32 | f32[3] | rotvec, rad, Android head frame x right / y forward / z up |
+| 44 | f32[3] | angvel, rad/s, same frame (space-frame rate; body-frame rate when flags bit2) |
+| 56 | f32[2] | reserved |
+
+Readers: seq1, retry if odd; copy; acquire fence; seq2; accept if equal (bounded retries). A frozen app process (ColorOS
+freezer) leaves the record unchanged, so readers must judge freshness from arrivalElapsedRealtimeNanos (CLOCK_BOOTTIME,
+comparable across processes). Test: `core/src/test/.../posebus/PoseShareWriterTest.kt` (byte layout, seqlock order of
+stores and fences, flag-only updates). Not tested on a phone.
 
 ## Using it
 
@@ -205,6 +275,7 @@ adb shell ps -A | grep librepods:headtracker                    # exactly one pr
 - `core/.../privileged/HeadPoseTelemetry.kt`: latest sample for Diagnostics, published only while observed or logging.
 - `core/.../bluetooth/aacp/AACPManager.kt`: payload decode and the pose conversion in `handleSensorData()`.
 - `app/.../services/SpatialHeadTrackingController.kt`: lifecycle and retries.
+- `core/.../posebus/` (`PoseShare`, `PoseShareWriter`, `IPoseShare.aidl`) and `app/.../services/PoseShareService.kt`: pose bus.
 - `app/.../screens/apple/HeadTrackingScreen.kt` (toggle), `HeadTrackingDiagnosticsScreen.kt`, `HeadOrientationView.kt`,
   `HeadPoseReplay.kt`.
 - `AndroidManifest.xml` declares `rikka.shizuku.ShizukuProvider` manually (it does not merge from the dependency).

@@ -28,6 +28,7 @@ import android.util.Log
  */
 class HeadTrackerUserService : IHeadTrackerService.Stub() {
     private val tracker = UhidHeadTracker()
+    private val keepAlive = CgroupKeepAlive()
     private var eventReaderThread: Thread? = null
 
     // Shizuku does not reliably reap an earlier instance of this process after the app is reinstalled
@@ -71,6 +72,7 @@ class HeadTrackerUserService : IHeadTrackerService.Stub() {
 
     override fun stop() {
         Log.i(TAG, "stop()")
+        keepAlive.stop()
         tracker.destroy()
         eventReaderThread?.interrupt()
         eventReaderThread = null
@@ -83,6 +85,28 @@ class HeadTrackerUserService : IHeadTrackerService.Stub() {
         // itself when unbound, but exit explicitly too for a clean stop
         // when the app asks for it directly.
         kotlin.system.exitProcess(0)
+    }
+
+    override fun startKeepAlive(uids: IntArray) {
+        // also this helper's own uid, in case the freezer reaches it
+        keepAlive.start((uids.toList() + android.os.Process.myUid()).distinct().toIntArray())
+    }
+
+    override fun stopKeepAlive() = keepAlive.stop()
+
+    override fun takeKeepAliveFailure(): String? = keepAlive.takeFirstFailure()
+
+    override fun whitelistPackage(pkg: String): String = try {
+        require(pkg.matches(Regex("[A-Za-z0-9_.]+"))) { "bad package name" }
+        val p = ProcessBuilder("cmd", "deviceidle", "whitelist", "+$pkg").redirectErrorStream(true).start()
+        val out = p.inputStream.bufferedReader().readText().trim()
+        val done = p.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)
+        if (!done) p.destroy()
+        val r = "exit=${if (done) p.exitValue() else "timeout"} $out"
+        Log.i(TAG, "deviceidle whitelist +$pkg -> $r")
+        r
+    } catch (t: Throwable) {
+        "error: $t"
     }
 
     companion object {

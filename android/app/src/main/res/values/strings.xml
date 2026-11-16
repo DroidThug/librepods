@@ -471,6 +471,9 @@
     <string name="spatial_head_tracking_mirror_ear_description">Saved for the %1$s AirPod, which is currently the primary one. Turning stays the same.</string>
     <string name="spatial_head_tracking_bud_left">left</string>
     <string name="spatial_head_tracking_bud_right">right</string>
+    <string name="spatial_head_tracking_battery_unrestricted">Battery optimization: off for LibrePods (head tracking can keep running with the screen off).</string>
+    <string name="spatial_head_tracking_battery_optimized">Battery optimization: on for LibrePods. The system may pause head tracking with the screen off.</string>
+    <string name="spatial_head_tracking_battery_request">Allow running in background</string>
     <string name="spatial_head_tracking_legacy_frame">Legacy head frame (for comparison)</string>
     <string name="spatial_head_tracking_legacy_frame_description">Uses the older head orientation math, which leaks some head tilt into turns. Off by default.</string>
     <string name="spatial_head_tracking_controls_stream">Pause is controlled by Spatial audio head tracking.</string>

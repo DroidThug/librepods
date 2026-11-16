@@ -24,6 +24,12 @@ object HeadFrame {
     /** Default for the A/B preference `spatial_head_tracking_legacy_frame` (false = this frame). */
     const val LEGACY_FRAME_DEFAULT = false
 
+    /**
+     * Default for the per-bud ear-axis mirror preferences (`spatial_head_tracking_mirror_ear_left`
+     * / `_right`): true, the user's AirPods needed the flip on both buds.
+     */
+    const val MIRROR_EAR_DEFAULT = true
+
     /** Below this horizontal length the ear axis is too close to vertical to define x. */
     const val MIN_EAR_HORIZONTAL = 0.2f
 

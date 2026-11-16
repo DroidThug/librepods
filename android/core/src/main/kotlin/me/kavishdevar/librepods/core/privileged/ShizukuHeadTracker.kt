@@ -66,10 +66,14 @@ object ShizukuHeadTracker {
      * the app's head tracking controller from `spatial_head_tracking_mirror_ear_left` / `_right`.
      */
     @Volatile
-    var mirrorEarLeft: Boolean = false
+    var mirrorEarLeft: Boolean = HeadFrame.MIRROR_EAR_DEFAULT
 
     @Volatile
-    var mirrorEarRight: Boolean = false
+    var mirrorEarRight: Boolean = HeadFrame.MIRROR_EAR_DEFAULT
+
+    /** Called with SystemClock.elapsedRealtime() for each AirPods motion packet while set (stall watchdog). */
+    @Volatile
+    var onSensorPacket: ((Long) -> Unit)? = null
 
     @Volatile
     private var service: IHeadTrackerService? = null
@@ -154,6 +158,26 @@ object ShizukuHeadTracker {
                 Log.w(TAG, "sendPose failed: $t")
             }
         }
+    }
+
+    /** Starts the helper's cgroup keep-alive for [uids]; false if unsupported (stale helper) or failed. */
+    fun startKeepAlive(uids: IntArray): Boolean = try {
+        service?.startKeepAlive(uids); service != null
+    } catch (t: Throwable) {
+        Log.w(TAG, "startKeepAlive failed (stale helper?): $t"); false
+    }
+
+    fun stopKeepAlive() {
+        try { service?.stopKeepAlive() } catch (t: Throwable) { Log.w(TAG, "stopKeepAlive failed: $t") }
+    }
+
+    fun takeKeepAliveFailure(): String? = try { service?.takeKeepAliveFailure() } catch (_: Throwable) { null }
+
+    /** `cmd deviceidle whitelist +pkg` as shell; returns the output or an error text. */
+    fun whitelistPackage(pkg: String): String = try {
+        service?.whitelistPackage(pkg) ?: "no helper"
+    } catch (t: Throwable) {
+        "error: $t"
     }
 
     fun stop() {

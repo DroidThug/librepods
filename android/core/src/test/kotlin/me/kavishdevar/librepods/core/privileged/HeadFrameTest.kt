@@ -117,6 +117,12 @@ class HeadFrameTest {
     }
 
     @Test
+    fun defaults() {
+        assertEquals(true, HeadFrame.MIRROR_EAR_DEFAULT)
+        assertEquals(false, HeadFrame.LEGACY_FRAME_DEFAULT)
+    }
+
+    @Test
     fun mirrorOffIsUnchanged() {
         val ear = earAxis(mountings[2])
         val twice = HeadFrame.mirrored(HeadFrame.mirrored(ear))
